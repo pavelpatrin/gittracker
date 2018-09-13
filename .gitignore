@@ -3,4 +3,3 @@
 venv
 *.pyc
 *.pyo
-*.json

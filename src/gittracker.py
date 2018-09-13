@@ -1,11 +1,10 @@
 import argparse
 import difflib
 import itertools
-import json
 import logging
 import subprocess
 import re
-import typing
+from typing import List
 
 
 class GitWrapper:
@@ -15,7 +14,7 @@ class GitWrapper:
         self._git_bin = git_bin
         self._git_dir = git_dir
 
-    def _git_cmd(self, *args) -> typing.List[str]:
+    def _git_cmd(self, *args) -> List[str]:
         self._logger.debug('Executing git with %s' % ' '.join(args))
         arguments = [self._git_bin, '--git-dir', self._git_dir, *args]
         output = subprocess.check_output(arguments, stderr=subprocess.STDOUT)
@@ -24,29 +23,21 @@ class GitWrapper:
             for line in output.split(b'\n') if line
         ]
 
-    def get_branches(self, remote: str, pattern: str) -> typing.List[str]:
-        self._logger.info('Getting branches list for %s/%s' % (remote, pattern))
-        pattern = re.compile(r'%s/(%s)' % (remote, pattern), re.IGNORECASE)
+    def get_branches(self, remote: str) -> List[str]:
+        self._logger.info('Getting branches list for %s' % remote)
         lines = self._git_cmd('branch', '-ar')
-
-        result = []
-        for line in lines:
-            line = line.strip()
-            if re.match(pattern, line):
-                branch = line.rsplit('/', 2)[-1]
-                result.append(branch)
-
-        return result
+        pattern = re.compile(r'\s\s%s/.*' % remote, re.IGNORECASE)
+        return [l.rsplit('/', 2)[-1].strip() for l in lines if pattern.match(l)]
 
     def get_merge_base(self, ref_subject: str, ref_target: str) -> str:
         self._logger.info('Getting merge-base for %s %s' % (ref_subject, ref_target))
         return self._git_cmd('merge-base', ref_subject, ref_target)[0]
 
-    def get_diff_files(self, ref_subject: str, ref_target: str) -> typing.List[str]:
+    def get_diff_files(self, ref_subject: str, ref_target: str) -> List[str]:
         self._logger.info('Getting changed files for %s %s' % (ref_subject, ref_target))
         return self._git_cmd('diff', '--name-only', ref_subject, ref_target)
 
-    def get_blame_file(self, rev: str, filepath: str) -> typing.List[dict]:
+    def get_blame_file(self, rev: str, filepath: str) -> List[dict]:
         self._logger.info('Getting file blame for %s %s' % (rev, filepath))
 
         try:
@@ -123,22 +114,50 @@ class GitWrapper:
 
 
 class GitTracker:
-    def __init__(self, wrapper: GitWrapper, ignored: typing.List[str]):
+    def __init__(
+        self,
+        wrapper: GitWrapper,
+        branches: List[str] = None,
+        no_branches: List[str] = None,
+        files: List[str] = None,
+        no_files: List[str] = None,
+    ):
         self._logger = logging.getLogger('%s.%s' % (__name__, 'GitTracker'))
         self._wrapper = wrapper
-        self._ignored = ignored
+        self._branches = branches
+        self._no_branches = no_branches
+        self._files = files
+        self._no_files = no_files
 
-    def track(self, remote: str, pattern: str) -> typing.List[dict]:
-        self._logger.info('Tracking branches for %s/%s' % (remote, pattern))
-        for branch in self._wrapper.get_branches(remote, pattern):
-            if branch not in self._ignored:
-                yield remote, branch, self._track_branch(remote, branch)
+    def track(self, remote: str) -> List[dict]:
+        self._logger.info('Tracking branches for %s' % remote)
+        include = re.compile(r'|'.join(self._branches or []), re.IGNORECASE)
+        exclude = re.compile(r'|'.join(self._no_branches or []), re.IGNORECASE)
+        branches = self._wrapper.get_branches(remote)
+
+        for branch in branches:
+            if self._branches and not include.search(branch):
+                continue
+
+            if self._no_branches and exclude.search(branch):
+                continue
+
+            yield remote, branch, self._track_branch(remote, branch)
 
     def _track_branch(self, remote: str, branch: str):
         self._logger.debug('Tracking branch %s/%s' % (remote, branch))
+        include = re.compile(r'|'.join(self._files or []), re.IGNORECASE)
+        exclude = re.compile(r'|'.join(self._no_files or []), re.IGNORECASE)
         merge_base = wrapper.get_merge_base('%s/%s' % (remote, branch), '%s/master' % remote)
         diff_files = wrapper.get_diff_files('%s/%s' % (remote, branch), merge_base)
+
         for file_path in diff_files:
+            if self._files and not include.search(file_path):
+                continue
+
+            if self._no_files and exclude.search(file_path):
+                continue
+
             yield file_path, self._track_file(branch, file_path)
 
     def _track_file(self, branch: str, file_path: str):
@@ -154,37 +173,43 @@ class GitTracker:
             if tag != 'equal' and self._track_needed(blame_master[m1:m2], blame_branch[b1:b2]):
                 yield blame_master[m1:m2], blame_branch[b1:b2]
 
-    def _track_needed(self, blames_master: typing.List[dict], blames_branch: typing.List[dict]) -> bool:
+    def _track_needed(self, blames_master: List[dict], blames_branch: List[dict]) -> bool:
         authors_master = {x['author-mail'] for x in blames_master}
         authors_branch = {x['author-mail'] for x in blames_branch}
         return bool(authors_master - authors_branch)
 
 
 class GitReporter:
-    def __init__(self, emails: typing.List[str]):
+    def __init__(self, emails: List[str]):
         self._emails = set(emails)
 
-    def display(self, changes: typing.List[dict]):
+    def display(self, changes: List[dict]):
         for remote, branch, branch_changes in changes:
-            header_shown = False
+            branch_header_shown = False
 
             for file_path, file_changes in branch_changes:
+                file_header_shown = False
+
                 for blames_master, blames_branch in file_changes:
                     authors_master = {x['author-mail'].strip('<>') for x in blames_master}
                     authors_branch = {x['author-mail'].strip('<>') for x in blames_branch}
 
                     if self._emails & authors_master and not self._emails & authors_branch:
-                        if not header_shown:
+                        if not branch_header_shown:
                             header = 'Branch %s/%s' % (remote, branch)
                             print(self._display_branch_header())
                             print(self._display_branch_content(header))
                             print(self._display_branch_footer())
-                            header_shown = True
+                            branch_header_shown = True
 
-                        header = 'Changes for branch %s/%s file %s' % (remote, branch, file_path)
-                        print(self._display_block_header())
-                        print(self._display_block_content(header))
-                        print(self._display_diff_header())
+                        if not file_header_shown:
+                            header = 'Changes for branch %s/%s file %s' % (remote, branch, file_path)
+                            print(self._display_block_header())
+                            print(self._display_block_content(header))
+                            print(self._display_diff_header())
+                            file_header_shown = True
+                        else:
+                            print(self._display_block_ruler())
 
                         left_lines = []
                         right_lines = []
@@ -215,7 +240,8 @@ class GitReporter:
 
                             print(self._display_diff_lines(left_line, right_line))
 
-                        print(self._display_diff_footer())
+                if file_header_shown:
+                    print(self._display_diff_footer())
 
     def _display_branch_header(self):
         return '╔' + '═' * 275 + '╗'
@@ -229,6 +255,9 @@ class GitReporter:
     def _display_block_header(self):
         return '┌' + '─' * 275 + '┐'
 
+    def _display_block_ruler(self):
+        return '│' + ' %-273s ' % ('╶' * 273) + '│'
+
     def _display_block_content(self, content):
         return '│' + ' %-273s ' % content + '│'
 
@@ -237,7 +266,7 @@ class GitReporter:
         return '├' + part + '┬' + part + '┤'
 
     def _display_diff_line(self, email, lineno, content):
-        email = '%s' % email.strip('<>')[:23]
+        email = '%s' % email.strip('<>')[:25]
         return '%-25s │ %-4s │ %s' % (email, lineno, content[:100])
 
     def _display_diff_lines(self, left_line, right_line):
@@ -252,13 +281,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--repopath', required=True, help='Path to git repo on disk')
     parser.add_argument('--remote', required=True, help='Git remote, f.e. "origin"')
-    parser.add_argument('--pattern', required=True, help='Filter branches regexp')
-    parser.add_argument('--email', required=True, nargs='+', help='Emails to track')
+    parser.add_argument('--users', required=True, nargs='+', help='Users emails to track')
+    parser.add_argument('--branches', nargs='+', help='Include branches regexp')
+    parser.add_argument('--no-branches', nargs='+', help='Exclude branches regexp')
+    parser.add_argument('--files', nargs='+', help='Include files regexp')
+    parser.add_argument('--no-files', nargs='+', help='Exclude files regexp')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
     wrapper = GitWrapper('git', args.repopath.rstrip('/') + '/.git')
-    tracker = GitTracker(wrapper, json.load(open('ignored.json')))
-    changes = tracker.track(args.remote, args.pattern)
-    reporter = GitReporter(args.email)
-    reporter.display(changes)
+    tracker = GitTracker(wrapper, args.branches, args.no_branches, args.files, args.no_files)
+    GitReporter(args.users).display(tracker.track(args.remote))
