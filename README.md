@@ -3,6 +3,11 @@
 Its simple to answer!
 
 ```bash
+# Simple usage
+python3.6 gittracker.py \
+    --repopath ../../target-web
+
+# Advanced usage
 python3.6 gittracker.py \
     --repopath ../../target-web \
     --remote origin \

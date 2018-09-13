@@ -210,8 +210,8 @@ class GitTracker:
 
 
 class GitReporter:
-    def __init__(self, emails: List[str]):
-        self._emails = set(emails)
+    def __init__(self, emails: List[str] = None):
+        self._emails = set(emails) if emails else None
 
     def display(self, changes: List[dict]):
         for remote, branch, branch_changes in changes:
@@ -224,51 +224,58 @@ class GitReporter:
                     authors_master = {x['author-mail'].strip('<>') for x in blames_master}
                     authors_branch = {x['author-mail'].strip('<>') for x in blames_branch}
 
-                    if self._emails & authors_master and not self._emails & authors_branch:
-                        if not branch_header_shown:
-                            header = 'Branch %s/%s' % (remote, branch)
-                            print(self._display_branch_header())
-                            print(self._display_branch_content(header))
-                            print(self._display_branch_footer())
-                            branch_header_shown = True
+                    # Фильтр по email включен и в мастере нет указанных email-ов.
+                    if self._emails and not self._emails & authors_master:
+                        continue
 
-                        if not file_header_shown:
-                            header = 'Changes for branch %s/%s file %s' % (remote, branch, file_path)
-                            print(self._display_block_header())
-                            print(self._display_block_content(header))
-                            print(self._display_diff_header())
-                            file_header_shown = True
-                        else:
-                            print(self._display_block_ruler())
+                    # Фильтр по email включен и в ветке есть email-ы не из мастера.
+                    if self._emails and not authors_branch - authors_master:
+                        continue
 
-                        left_lines = []
-                        right_lines = []
+                    if not branch_header_shown:
+                        header = 'Branch %s/%s' % (remote, branch)
+                        print(self._display_branch_header())
+                        print(self._display_branch_content(header))
+                        print(self._display_branch_footer())
+                        branch_header_shown = True
 
-                        for blame_master in blames_master:
-                            left_lines.append(self._display_diff_line(
-                                blame_master['author-mail'],
-                                blame_master['lineno'],
-                                blame_master['content'],
-                            ))
+                    if not file_header_shown:
+                        header = 'Changes for branch %s/%s file %s' % (remote, branch, file_path)
+                        print(self._display_block_header())
+                        print(self._display_block_content(header))
+                        print(self._display_diff_header())
+                        file_header_shown = True
+                    else:
+                        print(self._display_block_ruler())
 
-                        for blame_branch in blames_branch:
-                            right_lines.append(self._display_diff_line(
-                                blame_branch['author-mail'],
-                                blame_branch['lineno'],
-                                blame_branch['content'],
-                            ))
+                    left_lines = []
+                    right_lines = []
 
-                        lines_pairs = itertools.zip_longest(left_lines, right_lines)
-                        for index, (left_line, right_line) in enumerate(lines_pairs):
-                            if not left_line:
-                                left_line = 'Absent in master' if index == 0 else ''
-                                left_line = self._display_diff_line('', '', left_line)
+                    for blame_master in blames_master:
+                        left_lines.append(self._display_diff_line(
+                            blame_master['author-mail'],
+                            blame_master['lineno'],
+                            blame_master['content'],
+                        ))
 
-                            if not right_line:
-                                right_line = 'Absent in %s' % branch if index == 0 else ''
-                                right_line = self._display_diff_line('', '', right_line)
+                    for blame_branch in blames_branch:
+                        right_lines.append(self._display_diff_line(
+                            blame_branch['author-mail'],
+                            blame_branch['lineno'],
+                            blame_branch['content'],
+                        ))
 
-                            print(self._display_diff_lines(left_line, right_line))
+                    lines_pairs = itertools.zip_longest(left_lines, right_lines)
+                    for index, (left_line, right_line) in enumerate(lines_pairs):
+                        if not left_line:
+                            left_line = 'Absent in master' if index == 0 else ''
+                            left_line = self._display_diff_line('', '', left_line)
+
+                        if not right_line:
+                            right_line = 'Absent in %s' % branch if index == 0 else ''
+                            right_line = self._display_diff_line('', '', right_line)
+
+                        print(self._display_diff_lines(left_line, right_line))
 
                 if file_header_shown:
                     print(self._display_diff_footer())
@@ -319,8 +326,8 @@ if __name__ == '__main__':
     parser.add_argument('--gitpath', default='git', help='Path to git binary on disk')
     parser.add_argument('--repopath', required=True, help='Path to git repo on disk')
     parser.add_argument('--logging', default='FATAL', help='Logging to stderr level')
-    parser.add_argument('--remote', required=True, help='Git remote, f.e. "origin"')
-    parser.add_argument('--users', required=True, nargs='+', help='Users emails to track')
+    parser.add_argument('--remote', default='origin', help='Git remote repository')
+    parser.add_argument('--users', nargs='+', help='Users emails to track')
     parser.add_argument('--branches', nargs='+', help='Include branches regexp')
     parser.add_argument('--no-branches', nargs='+', help='Exclude branches regexp')
     parser.add_argument('--files', nargs='+', help='Include files regexp')
