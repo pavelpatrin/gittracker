@@ -211,7 +211,7 @@ class GitTracker:
 
 class GitReporter:
     def __init__(self, emails: List[str] = None):
-        self._emails = set(emails) if emails else None
+        self._owners = set(emails) if emails else None
 
     def display(self, changes: List[dict]):
         for remote, branch, branch_changes in changes:
@@ -225,11 +225,11 @@ class GitReporter:
                     authors_branch = {x['author-mail'].strip('<>') for x in blames_branch}
 
                     # Фильтр по email включен и в мастере нет указанных email-ов.
-                    if self._emails and not self._emails & authors_master:
+                    if self._owners and not self._owners & authors_master:
                         continue
 
                     # Фильтр по email включен и в ветке есть email-ы не из мастера.
-                    if self._emails and not authors_branch - authors_master:
+                    if self._owners and not authors_branch - authors_master:
                         continue
 
                     if not branch_header_shown:
@@ -327,7 +327,7 @@ if __name__ == '__main__':
     parser.add_argument('--repopath', required=True, help='Path to git repo on disk')
     parser.add_argument('--logging', default='FATAL', help='Logging to stderr level')
     parser.add_argument('--remote', default='origin', help='Git remote repository')
-    parser.add_argument('--users', nargs='+', help='Users emails to track')
+    parser.add_argument('--owners', nargs='+', help='Code owners emails to track')
     parser.add_argument('--branches', nargs='+', help='Include branches regexp')
     parser.add_argument('--no-branches', nargs='+', help='Exclude branches regexp')
     parser.add_argument('--files', nargs='+', help='Include files regexp')
@@ -341,7 +341,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=level, format='[%(asctime)s %(levelname)-5s] %(message)s')
 
     wrapper = GitWrapper(args.gitpath, args.repopath.rstrip('/') + '/.git')
-    GitReporter(args.users).display(GitTracker(
+    GitReporter(args.owners).display(GitTracker(
         wrapper, args.remote,
         args.branches, args.no_branches,
         args.files, args.no_files,

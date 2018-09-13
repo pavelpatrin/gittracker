@@ -11,7 +11,7 @@ python3.6 gittracker.py \
 python3.6 gittracker.py \
     --repopath ../../target-web \
     --remote origin \
-    --users p.patrin@gmail.com \
+    --owners p.patrin@gmail.com \
     --branches 'trg-[\d]+' \
     --files '.*\.py$' \
     --after-date '2018-09-01' \
