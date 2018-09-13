@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import difflib
 import itertools
 import logging
@@ -6,16 +7,18 @@ import subprocess
 import re
 from typing import List
 
+wrapper_logger = logging.getLogger('%s.%s' % (__name__, 'GitWrapper'))
+tracker_logger = logging.getLogger('%s.%s' % (__name__, 'GitTracker'))
+
 
 class GitWrapper:
     def __init__(self, git_bin: str, git_dir: str):
-        self._logger = logging.getLogger('%s.%s' % (__name__, 'GitWrapper'))
         self._encoding = 'utf-8'
         self._git_bin = git_bin
         self._git_dir = git_dir
 
     def _git_cmd(self, *args) -> List[str]:
-        self._logger.debug('Executing git with %s' % ' '.join(args))
+        wrapper_logger.debug('Executing git with %s' % ' '.join(args))
         arguments = [self._git_bin, '--git-dir', self._git_dir, *args]
         output = subprocess.check_output(arguments, stderr=subprocess.STDOUT)
         return [
@@ -24,21 +27,30 @@ class GitWrapper:
         ]
 
     def get_branches(self, remote: str) -> List[str]:
-        self._logger.info('Getting branches list for %s' % remote)
-        lines = self._git_cmd('branch', '-ar')
-        pattern = re.compile(r'\s\s%s/.*' % remote, re.IGNORECASE)
-        return [l.rsplit('/', 2)[-1].strip() for l in lines if pattern.match(l)]
+        wrapper_logger.info('Getting branches list for %s' % remote)
+        lines = self._git_cmd('branch', '-ar', '--format=%(refname:short) %(authordate:raw)')
+        pattern = re.compile(r'%s/.*' % remote, re.IGNORECASE)
+
+        result = []
+        for line in lines:
+            if pattern.match(line):
+                branch, timestamp, tzone = line.split()
+                branch = branch.rsplit('/', 2)[-1].strip()
+                authordate = datetime.datetime.fromtimestamp(int(timestamp))
+                result.append((branch, authordate))
+
+        return result
 
     def get_merge_base(self, ref_subject: str, ref_target: str) -> str:
-        self._logger.info('Getting merge-base for %s %s' % (ref_subject, ref_target))
+        wrapper_logger.info('Getting merge-base for %s %s' % (ref_subject, ref_target))
         return self._git_cmd('merge-base', ref_subject, ref_target)[0]
 
     def get_diff_files(self, ref_subject: str, ref_target: str) -> List[str]:
-        self._logger.info('Getting changed files for %s %s' % (ref_subject, ref_target))
+        wrapper_logger.info('Getting changed files for %s %s' % (ref_subject, ref_target))
         return self._git_cmd('diff', '--name-only', ref_subject, ref_target)
 
     def get_blame_file(self, rev: str, filepath: str) -> List[dict]:
-        self._logger.info('Getting file blame for %s %s' % (rev, filepath))
+        wrapper_logger.info('Getting file blame for %s %s' % (rev, filepath))
 
         try:
             output = self._git_cmd('blame', '--line-porcelain', rev, '--', filepath)
@@ -117,39 +129,54 @@ class GitTracker:
     def __init__(
         self,
         wrapper: GitWrapper,
+        remote: str,
         branches: List[str] = None,
         no_branches: List[str] = None,
         files: List[str] = None,
         no_files: List[str] = None,
+        after_date: datetime.datetime = None,
+        before_date: datetime.datetime = None,
     ):
-        self._logger = logging.getLogger('%s.%s' % (__name__, 'GitTracker'))
         self._wrapper = wrapper
+        self._remote = remote
         self._branches = branches
         self._no_branches = no_branches
         self._files = files
         self._no_files = no_files
+        self._after_date = after_date
+        self._before_date = before_date
 
-    def track(self, remote: str) -> List[dict]:
-        self._logger.info('Tracking branches for %s' % remote)
+    def track(self) -> List[dict]:
+        tracker_logger.info('Tracking branches for %s' % self._remote)
         include = re.compile(r'|'.join(self._branches or []), re.IGNORECASE)
         exclude = re.compile(r'|'.join(self._no_branches or []), re.IGNORECASE)
-        branches = self._wrapper.get_branches(remote)
+        branches = self._wrapper.get_branches(self._remote)
 
-        for branch in branches:
+        for branch, authordate in branches:
             if self._branches and not include.search(branch):
                 continue
 
             if self._no_branches and exclude.search(branch):
                 continue
 
-            yield remote, branch, self._track_branch(remote, branch)
+            if self._after_date and authordate < self._after_date:
+                continue
 
-    def _track_branch(self, remote: str, branch: str):
-        self._logger.debug('Tracking branch %s/%s' % (remote, branch))
+            if self._before_date and authordate > self._before_date:
+                continue
+
+            yield self._remote, branch, self._track_branch(branch)
+
+    def _track_branch(self, branch: str):
+        tracker_logger.debug('Tracking branch %s' % branch)
+
         include = re.compile(r'|'.join(self._files or []), re.IGNORECASE)
         exclude = re.compile(r'|'.join(self._no_files or []), re.IGNORECASE)
-        merge_base = wrapper.get_merge_base('%s/%s' % (remote, branch), '%s/master' % remote)
-        diff_files = wrapper.get_diff_files('%s/%s' % (remote, branch), merge_base)
+
+        branch_full = '%s/%s' % (self._remote, branch)
+        master_full = '%s/master' % self._remote
+        merge_base = self._wrapper.get_merge_base(branch_full, master_full)
+        diff_files = self._wrapper.get_diff_files(branch_full, merge_base)
 
         for file_path in diff_files:
             if self._files and not include.search(file_path):
@@ -161,22 +188,25 @@ class GitTracker:
             yield file_path, self._track_file(branch, file_path)
 
     def _track_file(self, branch: str, file_path: str):
-        self._logger.debug('Tracking file %s' % file_path)
-        blame_branch = wrapper.get_blame_file('origin/%s' % branch, file_path)
-        blame_master = wrapper.get_blame_file('origin/master', file_path)
+        tracker_logger.debug('Tracking file %s' % file_path)
+
+        blame_branch = wrapper.get_blame_file('%s/%s' % (self._remote, branch), file_path)
+        blame_master = wrapper.get_blame_file('%s/master' % self._remote, file_path)
 
         matcher = difflib.SequenceMatcher(None)
         matcher.set_seq1([x['content'].strip() for x in blame_master])
         matcher.set_seq2([x['content'].strip() for x in blame_branch])
 
         for tag, m1, m2, b1, b2 in matcher.get_opcodes():
-            if tag != 'equal' and self._track_needed(blame_master[m1:m2], blame_branch[b1:b2]):
-                yield blame_master[m1:m2], blame_branch[b1:b2]
+            if tag == 'equal':
+                continue
 
-    def _track_needed(self, blames_master: List[dict], blames_branch: List[dict]) -> bool:
-        authors_master = {x['author-mail'] for x in blames_master}
-        authors_branch = {x['author-mail'] for x in blames_branch}
-        return bool(authors_master - authors_branch)
+            authors_master = {x['author-mail'] for x in blame_master[m1:m2]}
+            authors_branch = {x['author-mail'] for x in blame_branch[b1:b2]}
+            if not authors_master - authors_branch:
+                continue
+
+            yield blame_master[m1:m2], blame_branch[b1:b2]
 
 
 class GitReporter:
@@ -278,17 +308,35 @@ class GitReporter:
 
 
 if __name__ == '__main__':
+    def parse_date(s):
+        try:
+            return datetime.datetime.strptime(s, '%Y-%m-%d')
+        except ValueError:
+            msg = 'Invalid date format: %s.' % s
+            raise argparse.ArgumentTypeError(msg)
+
     parser = argparse.ArgumentParser()
+    parser.add_argument('--gitpath', default='git', help='Path to git binary on disk')
     parser.add_argument('--repopath', required=True, help='Path to git repo on disk')
+    parser.add_argument('--logging', default='FATAL', help='Logging to stderr level')
     parser.add_argument('--remote', required=True, help='Git remote, f.e. "origin"')
     parser.add_argument('--users', required=True, nargs='+', help='Users emails to track')
     parser.add_argument('--branches', nargs='+', help='Include branches regexp')
     parser.add_argument('--no-branches', nargs='+', help='Exclude branches regexp')
     parser.add_argument('--files', nargs='+', help='Include files regexp')
     parser.add_argument('--no-files', nargs='+', help='Exclude files regexp')
+    parser.add_argument('--after-date', type=parse_date, help='Changes after date, YYYY-mm-dd')
+    parser.add_argument('--before-date', type=parse_date, help='Changes before date, YYYY-mm-dd')
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.WARNING)
-    wrapper = GitWrapper('git', args.repopath.rstrip('/') + '/.git')
-    tracker = GitTracker(wrapper, args.branches, args.no_branches, args.files, args.no_files)
-    GitReporter(args.users).display(tracker.track(args.remote))
+    level = logging.getLevelName(args.logging)
+    wrapper_logger.disabled = level != logging.NOTSET
+    logging.basicConfig(level=level, format='[%(asctime)s %(levelname)-5s] %(message)s')
+
+    wrapper = GitWrapper(args.gitpath, args.repopath.rstrip('/') + '/.git')
+    GitReporter(args.users).display(GitTracker(
+        wrapper, args.remote,
+        args.branches, args.no_branches,
+        args.files, args.no_files,
+        args.after_date, args.before_date,
+    ).track())
