@@ -5,7 +5,7 @@ import itertools
 import logging
 import subprocess
 import re
-from typing import List
+from typing import List, Tuple
 
 wrapper_logger = logging.getLogger('%s.%s' % (__name__, 'GitWrapper'))
 tracker_logger = logging.getLogger('%s.%s' % (__name__, 'GitTracker'))
@@ -26,7 +26,7 @@ class GitWrapper:
             for line in output.split(b'\n') if line
         ]
 
-    def get_branches(self, remote: str) -> List[str]:
+    def get_branches(self, remote: str) -> List[Tuple[str, datetime.datetime]]:
         wrapper_logger.info('Getting branches list for %s' % remote)
         lines = self._git_cmd('branch', '-ar', '--format=%(refname:short) %(authordate:raw)')
         pattern = re.compile(r'%s/.*' % remote, re.IGNORECASE)
