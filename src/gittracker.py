@@ -3,8 +3,8 @@ import datetime
 import difflib
 import itertools
 import logging
-import subprocess
 import re
+from gevent import pool, subprocess
 from typing import List, Tuple
 
 wrapper_logger = logging.getLogger('%s.%s' % (__name__, 'GitWrapper'))
@@ -129,6 +129,7 @@ class GitTracker:
     def __init__(
         self,
         wrapper: GitWrapper,
+        greenlets: int,
         remote: str,
         branches: List[str] = None,
         no_branches: List[str] = None,
@@ -138,6 +139,7 @@ class GitTracker:
         before_date: datetime.datetime = None,
     ):
         self._wrapper = wrapper
+        self._greenlets = greenlets
         self._remote = remote
         self._branches = branches
         self._no_branches = no_branches
@@ -151,6 +153,7 @@ class GitTracker:
         include = re.compile(r'|'.join(self._branches or []), re.IGNORECASE)
         exclude = re.compile(r'|'.join(self._no_branches or []), re.IGNORECASE)
         branches = self._wrapper.get_branches(self._remote)
+        filtered = []
 
         for branch, authordate in branches:
             if self._branches and not include.search(branch):
@@ -165,10 +168,17 @@ class GitTracker:
             if self._before_date and authordate > self._before_date:
                 continue
 
-            yield self._remote, branch, self._track_branch(branch)
+            filtered.append(branch)
+
+        def track_branch(branch):
+            return branch, self._track_branch(branch)
+
+        gpool = pool.Pool(self._greenlets)
+        for branch, tracked in gpool.imap(track_branch, filtered):
+            yield self._remote, branch, tracked
 
     def _track_branch(self, branch: str):
-        tracker_logger.debug('Tracking branch %s' % branch)
+        tracker_logger.info('Tracking branch %s' % branch)
 
         include = re.compile(r'|'.join(self._files or []), re.IGNORECASE)
         exclude = re.compile(r'|'.join(self._no_files or []), re.IGNORECASE)
@@ -177,6 +187,7 @@ class GitTracker:
         master_full = '%s/master' % self._remote
         merge_base = self._wrapper.get_merge_base(branch_full, master_full)
         diff_files = self._wrapper.get_diff_files(branch_full, merge_base)
+        tracked = []
 
         for file_path in diff_files:
             if self._files and not include.search(file_path):
@@ -185,7 +196,9 @@ class GitTracker:
             if self._no_files and exclude.search(file_path):
                 continue
 
-            yield file_path, self._track_file(branch, file_path)
+            tracked.append((file_path, self._track_file(branch, file_path)))
+
+        return tracked
 
     def _track_file(self, branch: str, file_path: str):
         tracker_logger.debug('Tracking file %s' % file_path)
@@ -196,6 +209,7 @@ class GitTracker:
         matcher = difflib.SequenceMatcher(None)
         matcher.set_seq1([x['content'].strip() for x in blame_master])
         matcher.set_seq2([x['content'].strip() for x in blame_branch])
+        tracked = []
 
         for tag, m1, m2, b1, b2 in matcher.get_opcodes():
             if tag == 'equal':
@@ -206,7 +220,9 @@ class GitTracker:
             if not authors_master - authors_branch:
                 continue
 
-            yield blame_master[m1:m2], blame_branch[b1:b2]
+            tracked.append((blame_master[m1:m2], blame_branch[b1:b2]))
+
+        return tracked
 
 
 class GitReporter:
@@ -325,6 +341,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--gitpath', default='git', help='Path to git binary on disk')
     parser.add_argument('--repopath', required=True, help='Path to git repo on disk')
+    parser.add_argument('--greenlets', default=1, type=int, help='Count of green threads')
     parser.add_argument('--logging', default='FATAL', help='Logging to stderr level')
     parser.add_argument('--remote', default='origin', help='Git remote repository')
     parser.add_argument('--owners', nargs='+', help='Code owners emails to track')
@@ -342,7 +359,7 @@ if __name__ == '__main__':
 
     wrapper = GitWrapper(args.gitpath, args.repopath.rstrip('/') + '/.git')
     GitReporter(args.owners).display(GitTracker(
-        wrapper, args.remote,
+        wrapper, args.greenlets, args.remote,
         args.branches, args.no_branches,
         args.files, args.no_files,
         args.after_date, args.before_date,
